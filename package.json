@@ -1,13 +1,16 @@
 {
   "name": "car-x-voice-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Backend for Car X Voice",
   "main": "server.js",
+  "private": true,
+  "engines": { "node": ">=22 <25" },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "dependencies": {
-    "@google/genai": "^0.1.1",
+    "@google/genai": "3.0.0",
     "express": "^4.19.2"
   }
 }

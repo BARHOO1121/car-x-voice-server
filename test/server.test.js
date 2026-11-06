@@ -154,6 +154,7 @@ test('server model overrides return the effective model to the Live client', asy
 test('provider errors are classified without leaking their body or credentials', async t => {
   for (const [upstreamStatus, expectedStatus, expectedCode] of [
     [429, 429, 'service_busy'], [403, 503, 'provider_auth_error'], [404, 503, 'model_unavailable'],
+    [402, 503, 'provider_billing_error'],
     [500, 502, 'provider_unavailable'], [400, 400, 'invalid_provider_request'],
   ]) {
     const f = await fixture(t, { upstream: async () => new Response(JSON.stringify({ error: { message: 'private-provider-data', code: upstreamStatus } }), { status: upstreamStatus }) });
@@ -161,6 +162,7 @@ test('provider errors are classified without leaking their body or credentials',
     assert.equal(response.status, expectedStatus);
     const result = await response.json();
     assert.equal(result.code, expectedCode);
+    if (upstreamStatus === 402) assert.equal(result.error, 'تحتاج فوترة Gemini إلى مراجعة لدى مدير الخدمة');
     assert.ok(result.requestId);
     assert.ok(!JSON.stringify([result, f.logs]).includes('private-provider-data'));
     assert.ok(!JSON.stringify([result, f.logs]).includes(env.GEMINI_API_KEY));

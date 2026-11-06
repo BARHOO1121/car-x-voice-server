@@ -34,7 +34,10 @@ function createApp({ env = process.env, provider, logger = console } = {}) {
   });
 
   function fail(res, status, code) {
-    return res.status(status).json({ error: 'تعذر إتمام الطلب', code, requestId: res.locals.requestId });
+    const error = code === 'provider_billing_error'
+      ? 'تحتاج فوترة Gemini إلى مراجعة لدى مدير الخدمة'
+      : 'تعذر إتمام الطلب';
+    return res.status(status).json({ error, code, requestId: res.locals.requestId });
   }
 
   app.get('/', (req, res) => res.status(200).send('Car X Voice Server is Live!'));
@@ -84,6 +87,8 @@ function createApp({ env = process.env, provider, logger = console } = {}) {
         } else if (upstreamStatus === 429) {
           status = 429; code = 'service_busy';
           res.set('Retry-After', '30');
+        } else if (upstreamStatus === 402) {
+          status = 503; code = 'provider_billing_error';
         } else if (upstreamStatus === 401 || upstreamStatus === 403) {
           status = 503; code = 'provider_auth_error';
         } else if (upstreamStatus === 404) {

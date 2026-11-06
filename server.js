@@ -1,6 +1,7 @@
 const express = require('express');
 const { randomUUID, timingSafeEqual } = require('node:crypto');
 const { createGeminiProvider } = require('./gemini');
+const { voiceTools, voiceInstruction, fallbackRequest } = require('./voice-policy');
 
 const MODEL = /^(?:models\/)?gemini-[A-Za-z0-9._-]{1,100}$/;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -110,11 +111,15 @@ function createApp({ env = process.env, provider, logger = console } = {}) {
     const model = modelName(env.GEMINI_MODEL || body?.model);
     const request = body?.request;
     if (!model || !object(request) || !Array.isArray(request.contents) ||
-        request.contents.length === 0 || !request.contents.every(content)) {
+        request.contents.length === 0 || !request.contents.every(content) ||
+        (request.tools != null && (!Array.isArray(request.tools) || !request.tools.every(object))) ||
+        (request.generationConfig != null && !object(request.generationConfig)) ||
+        (request.systemInstruction != null && !content(request.systemInstruction))) {
       return fail(res, 400, 'invalid_request');
     }
-    // Forward the original Gemini envelope, including audio, tools and function results.
-    res.json(await gemini.generate(model, request, signal));
+    // Keep audio and local function results; prevent hosted-tool add-ons and
+    // multiple/oversized fallback answers from increasing voice-service costs.
+    res.json(await gemini.generate(model, fallbackRequest(request), signal));
   }));
 
   app.post('/api/live-token', authorize, parseBody, action(async (req, res, signal) => {
@@ -128,10 +133,10 @@ function createApp({ env = process.env, provider, logger = console } = {}) {
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const config = {
       responseModalities: ['AUDIO'],
-      systemInstruction: body.systemInstruction,
+      systemInstruction: voiceInstruction(body.systemInstruction, body.tools),
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      ...(body.tools == null ? {} : { tools: body.tools }),
+      ...(body.tools == null ? {} : { tools: voiceTools(body.tools) }),
       ...(body.voiceName == null ? {} : {
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: body.voiceName } } },
       }),
@@ -141,7 +146,8 @@ function createApp({ env = process.env, provider, logger = console } = {}) {
       expireTime: expiresAt,
       newSessionExpireTime: new Date(Date.now() + 60 * 1000).toISOString(),
       liveConnectConstraints: { model, config },
-      // Lock all setup fields to this activated client's requested configuration.
+      // Lock the effective voice policy, including the tool list. The Live
+      // client cannot re-enable hosted tools in its own WebSocket setup.
     }, signal);
     if (typeof token?.name !== 'string' || !token.name.startsWith('auth_tokens/') ||
         token.name.length > 16384) throw new Error('Invalid token response');
@@ -153,7 +159,7 @@ function createApp({ env = process.env, provider, logger = console } = {}) {
     const message = req.body?.message || req.body?.prompt;
     const model = modelName(env.GEMINI_MODEL || 'gemini-2.5-flash');
     if (!model || typeof message !== 'string' || !message.trim()) return fail(res, 400, 'invalid_request');
-    const response = await gemini.generate(model, { contents: [{ role: 'user', parts: [{ text: message }] }] }, signal);
+    const response = await gemini.generate(model, fallbackRequest({ contents: [{ role: 'user', parts: [{ text: message }] }] }), signal);
     const reply = response.candidates?.[0]?.content?.parts?.filter(part => !part.thought && typeof part.text === 'string')
       .map(part => part.text).join('');
     if (!reply) return fail(res, 502, 'empty_response');

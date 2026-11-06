@@ -82,7 +82,9 @@ test('audio over the former 100 KB limit, tool calls, results and Gemini respons
   const response = await f.post('/api/generate', body);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), responseBody);
-  assert.deepEqual(JSON.parse(f.outgoing[0].body), body.request);
+  assert.deepEqual(JSON.parse(f.outgoing[0].body), {
+    ...body.request, generationConfig: { maxOutputTokens: 128, candidateCount: 1 },
+  });
   assert.equal(f.outgoing[0].url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent');
   assert.equal(f.outgoing[0].headers['x-goog-api-key'], env.GEMINI_API_KEY);
   assert.equal(f.outgoing[0].redirect, 'error');
@@ -130,10 +132,58 @@ test('Live uses the real installed SDK and issues a new constrained single-use t
   }
 });
 
+test('voice routes remove hosted tools without removing Android functions or their results', async t => {
+  const f = await fixture(t);
+  const mixedTools = [
+    { ...tools[0], googleSearch: {} }, { googleMaps: {} }, { urlContext: {} },
+    { codeExecution: {} }, { futureHostedTool: {} },
+  ];
+  const request = { ...generateBody.request, tools: mixedTools };
+  assert.equal((await f.post('/api/generate', { ...generateBody, request })).status, 200);
+  assert.equal((await f.post('/api/live-token', { ...liveBody, tools: mixedTools })).status, 200);
+  const rest = JSON.parse(f.outgoing[0].body);
+  const token = JSON.parse(f.outgoing[1].body);
+  for (const effective of [rest, token.bidiGenerateContentSetup]) {
+    assert.deepEqual(effective.tools, tools);
+    assert.deepEqual(effective.systemInstruction.parts.slice(0, -1), instruction.parts);
+    assert.match(effective.systemInstruction.parts.at(-1).text, /Do not claim to have searched/);
+    for (const blocked of ['googleSearch', 'googleMaps', 'urlContext', 'codeExecution', 'futureHostedTool']) {
+      assert.ok(!JSON.stringify(effective.tools).includes(blocked));
+    }
+  }
+  // No field mask means Google uses the entire constrained setup, ignoring
+  // the client's attempt to send its original Google Search tool again.
+  assert.ok(!token.fieldMask);
+  assert.deepEqual(rest.contents, request.contents);
+  assert.deepEqual(request.tools, mixedTools);
+
+  assert.equal((await f.post('/api/live-token', { ...liveBody, tools: [{ googleSearch: {} }] })).status, 200);
+  assert.deepEqual(JSON.parse(f.outgoing[2].body).bidiGenerateContentSetup.tools, []);
+});
+
+test('fallback and legacy routes request only one bounded answer and honor lower caller limits', async t => {
+  const f = await fixture(t);
+  for (const [generationConfig, expected] of [
+    [undefined, 1024], [{ candidateCount: 8, maxOutputTokens: 64000, temperature: 0.4 }, 1024],
+    [{ maxOutputTokens: 64 }, 64], [{ maxOutputTokens: -1 }, 1024],
+  ]) {
+    const request = { ...generateBody.request, generationConfig };
+    assert.equal((await f.post('/api/generate', { ...generateBody, request })).status, 200);
+    const config = JSON.parse(f.outgoing.at(-1).body).generationConfig;
+    assert.equal(config.candidateCount, 1);
+    assert.equal(config.maxOutputTokens, expected);
+    if (generationConfig?.temperature != null) assert.equal(config.temperature, generationConfig.temperature);
+  }
+  assert.equal((await f.post('/chat', { message: 'مرحبا' })).status, 200);
+  assert.deepEqual(JSON.parse(f.outgoing.at(-1).body).generationConfig, { candidateCount: 1, maxOutputTokens: 1024 });
+});
+
 test('invalid models and request shapes cannot become a greeting or an upstream URL', async t => {
   const f = await fixture(t);
   for (const body of [{}, null, { ...generateBody, model: 'https://attacker.example' },
-    { ...generateBody, model: 'gemini-../other' }, { ...generateBody, request: { contents: [] } }]) {
+    { ...generateBody, model: 'gemini-../other' }, { ...generateBody, request: { contents: [] } },
+    ...[{ tools: {} }, { tools: [null] }, { generationConfig: [] }, { systemInstruction: 'invalid' }]
+      .map(extra => ({ ...generateBody, request: { ...generateBody.request, ...extra } }))]) {
     assert.equal((await f.post('/api/generate', body)).status, 400);
   }
   for (const body of [{}, { ...liveBody, systemInstruction: {} }, { ...liveBody, tools: {} }, { ...liveBody, voiceName: 42 }]) {
